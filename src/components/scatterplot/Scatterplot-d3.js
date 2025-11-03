@@ -7,146 +7,171 @@ class ScatterplotD3 {
     height;
     width;
     matSvg;
-    // add specific class properties used for the vis render/updates
-    defaultOpacity=0.3;
-    transitionDuration=1000;
+    defaultOpacity = 0.3;
+    transitionDuration = 1000;
     circleRadius = 3;
     xScale;
     yScale;
 
-
     constructor(el){
-        this.el=el;
+        this.el = el;
+        this.currentData = [];
+        this.currentXAttr = null;
+        this.currentYAttr = null;
+        this.currentControllerMethods = null;
     };
 
     create = function (config) {
         this.size = {width: config.size.width, height: config.size.height};
 
-        // get the effect size of the view by subtracting the margin
         this.width = this.size.width - this.margin.left - this.margin.right;
         this.height = this.size.height - this.margin.top - this.margin.bottom ;
         console.log("create SVG width=" + (this.width + this.margin.left + this.margin.right ) + " height=" + (this.height+ this.margin.top + this.margin.bottom));
-        // initialize the svg and keep it in a class property to reuse it in renderScatterplot()
-        this.matSvg=d3.select(this.el).append("svg")
+
+        this.matSvg = d3.select(this.el).append("svg")
             .attr("width", this.width + this.margin.left + this.margin.right)
             .attr("height", this.height + this.margin.top + this.margin.bottom)
             .append("g")
             .attr("class","matSvgG")
             .attr("transform", "translate(" + this.margin.left + "," + this.margin.top + ")");
-        ;
 
         this.xScale = d3.scaleLinear().range([0,this.width]);
         this.yScale = d3.scaleLinear().range([this.height,0]);
 
-        // build xAxisG
         this.matSvg.append("g")
             .attr("class","xAxisG")
-            .attr("transform","translate(0,"+this.height+")")
-        ;
+            .attr("transform","translate(0,"+this.height+")");
+
         this.matSvg.append("g")
-            .attr("class","yAxisG")
-        ;
+            .attr("class","yAxisG");
+
+        this.brushG = this.matSvg.append("g")
+            .attr("class","brush");
     }
 
     changeBorderAndOpacity(selection, selected){
-        selection.style("opacity", selected?1:this.defaultOpacity)
-        ;
+        selection
+            .style("opacity", selected ? 1 : this.defaultOpacity);
 
         selection.select(".markerCircle")
-            .attr("stroke-width",selected?2:0)
-        ;
+            .attr("stroke-width", selected ? 2 : 0);
     }
 
     updateMarkers(selection,xAttribute,yAttribute){
-        // transform selection
         selection
             .transition().duration(this.transitionDuration)
             .attr("transform", (item)=>{
-                // use scales to return shape position from data values
-                const xPos = this.xScale(item[xAttribute]);
-                const yPos = this.yScale(item[yAttribute]);
+                const xPos = this.xScale(+item[xAttribute]);
+                const yPos = this.yScale(+item[yAttribute]);
                 return "translate("+xPos+","+yPos+")";
-            })
-        ;
-        this.changeBorderAndOpacity(selection,false)
+            });
+
+        this.changeBorderAndOpacity(selection,false);
     }
 
     highlightSelectedItems(selectedItems){
-        // use pattern update to change the border and opacity of the markers:
-        //      - call this.changeBorderAndOpacity(selection,true) for markers that match selectedItems
-        //      - this.changeBorderAndOpacity(selection,false) for markers the do not match selectedItems
+        const selectedSet = new Set((selectedItems || []).map(d => d.index));
         this.matSvg.selectAll(".markerG")
-            // all elements with the class .markerG (empty the first time)
-            .data(selectedItems,(itemData)=>itemData.index)
-            .join(
-                enter=>enter,
-                update=>{
-                    this.changeBorderAndOpacity(update, true);
-                },
-                exit => {
-                    this.changeBorderAndOpacity(exit, false);
-                }
-            )
-        ;
+            .each((d,i,nodes) => {
+                const sel = d3.select(nodes[i]);
+                const isSelected = selectedSet.has(d.index);
+                this.changeBorderAndOpacity(sel, isSelected);
+            });
     }
 
     updateAxis = function(visData,xAttribute,yAttribute){
-        // compute min max using d3.min/max(visData.map(item=>item.attribute))
-        const minXAxis = d3.min(visData.map((item)=>{return item[xAttribute]}));
-        const maxXAxis = d3.max(visData.map((item)=>{return item[xAttribute]}));
-        const minYAxis = d3.min(visData.map((item)=>{return item[yAttribute]}));
-        const maxYAxis = d3.max(visData.map((item)=>{return item[yAttribute]}));
+        const xVals = visData.map((item)=> +item[xAttribute]);
+        const yVals = visData.map((item)=> +item[yAttribute]);
+
+        const minXAxis = d3.min(xVals);
+        const maxXAxis = d3.max(xVals);
+        const minYAxis = d3.min(yVals);
+        const maxYAxis = d3.max(yVals);
 
         this.xScale.domain([minXAxis,maxXAxis]);
         this.yScale.domain([minYAxis,maxYAxis]);
 
-        // create axis with computed scales
         this.matSvg.select(".xAxisG")
             .transition().duration(500)
-            .call(d3.axisBottom(this.xScale))
-        ;
+            .call(d3.axisBottom(this.xScale));
+
         this.matSvg.select(".yAxisG")
             .transition().duration(500)
-            .call(d3.axisLeft(this.yScale))
+            .call(d3.axisLeft(this.yScale));
     }
 
+    installBrush(){
+        const that = this;
+
+        const brush = d3.brush()
+            .extent([[0,0], [this.width, this.height]])
+            .on("brush end", function(event){
+                if (!that.currentData || that.currentData.length === 0) return;
+                const ctrl = that.currentControllerMethods;
+                if (!ctrl || !ctrl.handleOnBrush) return;
+
+                const sel = event.selection;
+                if (!sel){
+                    ctrl.handleOnBrush([]);
+                    return;
+                }
+
+                const [[x0,y0],[x1,y1]] = sel;
+
+                const brushedItems = that.currentData.filter(d => {
+                    const x = that.xScale(+d[that.currentXAttr]);
+                    const y = that.yScale(+d[that.currentYAttr]);
+                    return x0 <= x && x <= x1 && y0 <= y && y <= y1;
+                });
+
+                ctrl.handleOnBrush(brushedItems);
+            });
+
+        this.brushG.call(brush);
+    }
 
     renderScatterplot = function (visData, xAttribute, yAttribute, controllerMethods){
-        console.log("render scatterplot with a new data list ...")
-        // build the size scales and x,y axis
-        this.updateAxis(visData, xAttribute, yAttribute);
+        console.log("render scatterplot with a new data list ...");
+
+        // FILTRIRAJ LOŠE REDOVE (bez broja na osi x/y)
+        const filteredData = visData.filter(d =>
+            Number.isFinite(+d[xAttribute]) && Number.isFinite(+d[yAttribute])
+        );
+
+        this.currentData = filteredData;
+        this.currentXAttr = xAttribute;
+        this.currentYAttr = yAttribute;
+        this.currentControllerMethods = controllerMethods;
+
+        this.updateAxis(filteredData, xAttribute, yAttribute);
 
         this.matSvg.selectAll(".markerG")
-            // all elements with the class .markerG (empty the first time)
-            .data(visData,(itemData)=>itemData.index)
+            .data(filteredData,(itemData)=>itemData.index)
             .join(
                 enter=>{
-                    // all data items to add:
-                    // doesn’exist in the select but exist in the new array
-                    const itemG=enter.append("g")
+                    const itemG = enter.append("g")
                         .attr("class","markerG")
                         .style("opacity",this.defaultOpacity)
                         .on("click", (event,itemData)=>{
                             controllerMethods.handleOnClick(itemData);
-                        })
-                    ;
-                    // render element as child of each element "g"
+                        });
+
                     itemG.append("circle")
                         .attr("class","markerCircle")
                         .attr("r",this.circleRadius)
-                        .attr("stroke","red")
-                    ;
+                        .attr("stroke","red");
+
                     this.updateMarkers(itemG,xAttribute,yAttribute);
                 },
                 update=>{
-                    this.updateMarkers(update,xAttribute,yAttribute)
+                    this.updateMarkers(update,xAttribute,yAttribute);
                 },
                 exit =>{
-                    exit.remove()
-                    ;
+                    exit.remove();
                 }
+            );
 
-            )
+        this.installBrush();
     }
 
     clear = function(){
